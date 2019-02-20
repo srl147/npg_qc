@@ -156,7 +156,7 @@ subtest 'loading data from directories' => sub {
   is( $collection->size(), 16, '16 results for run 3565 from path' ); 
 
   $collection = $s->load_from_path(qw(t/data/qc_store));
-  ok($collection->is_empty, 'sequence_summary result is not loaded'); 
+  is($collection->size, 1, 'sequence_summary result is loaded'); 
   
   open my $fh, '>', "$temp/bad.json" or die 'cannot open file for writing';
   close $fh;
@@ -376,7 +376,7 @@ subtest 'loading data from staging - new style directory structure' => sub {
 };
 
 subtest 'loading data from staging - new style directory structure, merges' => sub {
-  plan tests => 7;
+  plan tests => 9;
   
   my $id_run = 26291;
   my $rf_name = '180711_HX4_B_HLWFJCCXY_NEWM';
@@ -412,9 +412,12 @@ subtest 'loading data from staging - new style directory structure, merges' => s
   $collection = $model->load($query);
   is($collection->size(), 9, 'no lane filtering');
   
-  make_path $ar_path . '/lane1-2';
-  map {mv  $_, $ar_path . '/lane1-2' . $_}
-  map {join q[/], $ar_path, $_} qw/plex0  plex11  plex3/;
+  my $dir12 = $ar_path . '/lane1-2';
+  make_path $dir12;
+  foreach my $d (qw/plex0  plex11  plex3/) {
+    my $dsource = join q[/], $ar_path, $d;
+    `mv $dsource $dir12`;
+  }
 
   $query = _build_query_obj({id_run => $id_run, option => $PLEXES});
   $collection = $model->load($query);
@@ -423,6 +426,14 @@ subtest 'loading data from staging - new style directory structure, merges' => s
   $query = _build_query_obj({id_run => $id_run, option => $ALL});
   $collection = $model->load($query);
   is($collection->size(), 9, 'nine results for three plexes, no lane results');
+
+  $query = _build_query_obj({id_run => $id_run, positions => [4, 1], option => $ALL});
+  $collection = $model->load($query);
+  is($collection->size(), 9, 'nine results for lanes 4 and 1');
+
+  $query = _build_query_obj({id_run => $id_run, positions => [4, 5], option => $ALL});
+  $collection = $model->load($query);
+  is($collection->size(), 0, 'no results for lanes 4 and 5');
 };
 
 subtest 'retrieving data from the database - one-component entities' => sub {

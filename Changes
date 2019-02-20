@@ -1,5 +1,24 @@
 LIST OF CHANGES FOR NPG-QC PACKAGE
 
+
+release 66.2
+ - SeqQC: heatmaps from samtools stats files as a source
+ - relax JSON parser (allow non-utf8 characters) when loading sequence_summary
+   results to the db
+ - ref match results sort order - make deterministic (important for consistency
+   of data we load to the warehouse), also add a method to return top two results
+ - fixes for composite genotype script following previous release 
+
+release 66.1.1
+ - composite genotype check script (call_gtck_composite_rpt.pl) search
+     for run folders disabled - only use iRODS cram files
+
+release 66.1
+ - autoqc results loader to check for potential composition digest clashes
+ - amend upstream_tags check to find previous runs which have reached
+     status "analysis complete" (instead of "run complete")
+
+release 66.0
  - GUI for utility QC (inactive)
  - add new bcfstats qc check + viewer change
  - skip incomplete tag zero results in genotype_call POSTing to LIMs
@@ -29,10 +48,14 @@ LIST OF CHANGES FOR NPG-QC PACKAGE
     of an explicit list of input files (that approach became unworkable
     with highly plexed lanes)
  - add result_file_path attribute to file-based result objects
+ - samtools stats file parser
+ - qX_yield and gc_fraction autoqc checks to use samtools stats files
+   instead of fastqcheck file
  - SeqQC:
      links for latest ivc and analysis removed since the target files are
        no longer produced;
      link for full rna seqc analysis follows info in the result object
+  - remove can_run restriction of verify_bam_id check for (cD|R)NA libraries
 
 release 65.4.1
  - store value of output_dir from the RNA-SeQC check into the database

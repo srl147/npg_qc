@@ -12,7 +12,7 @@ use Class::Load qw/load_class/;
 
 use npg_tracking::illumina::runfolder;
 use npg_qc::Schema;
-use npg_qc::autoqc::qc_store::options qw/$ALL $LANES $PLEXES/;
+use npg_qc::autoqc::qc_store::options qw/$ALL $ALLALL $LANES $PLEXES/;
 use npg_qc::autoqc::qc_store::query;
 use npg_qc::autoqc::role::result;
 use npg_qc::autoqc::results::collection;
@@ -22,9 +22,6 @@ our $VERSION = '0';
 Readonly::Scalar my $CLASS_FIELD       => q[__CLASS__];
 Readonly::Scalar my $NO_TAG_INDEX      => -1;
 Readonly::Scalar my $QC_DIR_NAME       => q[qc];
-Readonly::Hash   my %READ_NAME_MAPPING => ( forward => 1,
-                                            reverse => 2,
-                                            index   => 't', );
 
 ## no critic (Documentation::RequirePodAtEnd Subroutines::ProhibitManyArgs)
 
@@ -196,10 +193,7 @@ sub load_from_path {
   my $c = npg_qc::autoqc::results::collection->new();
 
   foreach my $file (glob(join q[ ], @patterns)) {
-    my $r = $self->json_file2result_object($file);
-    if ($r) {
-      $c->add($r);
-    }
+    $c->add($self->json_file2result_object($file));
   }
 
   return $c;
@@ -257,50 +251,37 @@ autoqc result objects corresponding to JSON files.
 
 =cut
 
-sub load_from_staging_archive { ##no critic (Subroutines::ProhibitExcessComplexity)
+sub load_from_staging_archive {
   my ($self, $query, $archive_path) = @_;
 
   defined $query or croak q[Query object should be defined];
   (defined $archive_path && -d $archive_path)
     or croak q[Archive directory should be defined and should exist];
 
-  my %lh           = map { $_ => 1 } @{$query->positions};
-  my @lane_dirs    = glob $self->_lane_dirs_glob($archive_path, $query);
-  my @lane_qc_dirs = map { join q[/], $_, $QC_DIR_NAME } @lane_dirs;
-  my $old_qc_dir   = join q[/], $archive_path, $QC_DIR_NAME;
-  my $old_style    = -d $old_qc_dir;
+  my @plex_globs = map { 'lane' . $_ } @{$query->positions};
+  my @lane_globs = @plex_globs ? @plex_globs : 'lane*';
+  if (-d "$archive_path/$QC_DIR_NAME") { # Old-style run folder
+    @plex_globs = @lane_globs;
+    @lane_globs = (q[]);
+  } else {
+    push @plex_globs, @plex_globs ? 'lane*-*' : 'lane*';
+    push @plex_globs, q[];
+    @plex_globs = map { $_ . '/plex*'} @plex_globs;
+  }
+  @plex_globs = map { "$archive_path/$_/$QC_DIR_NAME"} @plex_globs;
+  @lane_globs = map { "$archive_path/$_/$QC_DIR_NAME"} @lane_globs;
 
-  my @collections = ();
-  my @dirs        = ();
-  my $merged      = 0;
+  my @results = ();
+  my $merged  = 0;
 
   #####
-  # Plex-level QC results for either merged or unmerged entities,
-  # but not both.
+  # Plex-level QC results for either merged or unmerged entities.
   #
-  if ( $query->option == $PLEXES || $query->option == $ALL ) {
-    my $collection;
-    if ($old_style) {
-      push @dirs, @lane_qc_dirs;
-    } else {
-      if (@lane_dirs) {
-        my @tdirs = map {"$_/*plex*/$QC_DIR_NAME"} @lane_dirs;
-        $collection = $self->load_from_path(@tdirs, $query);
-      }
-      # No results for one component compositions - try merges
-      if (!$collection || $collection->is_empty) {
-        my @tdirs;
-        push @tdirs, join q[/], $archive_path, 'plex*', $QC_DIR_NAME;
-        push @tdirs, join q[/], $archive_path, 'lane*-', 'plex*', $QC_DIR_NAME;
-        $collection = $self->load_from_path(@tdirs, $query);
-        if ($collection->size) {
-          $merged = 1;
-        }
-      }
-      if ($collection->size) {
-        push @collections, $collection;
-      }
-    }
+  if ( $query->option == $PLEXES ||
+       $query->option == $ALL || $query->option == $ALLALL) {
+    my $collection = $self->load_from_path(@plex_globs, $query);
+    $merged = any {$_->composition->num_components > 1} @{$collection->results};
+    @results = @{$collection->results};
   }
 
   #####
@@ -310,25 +291,23 @@ sub load_from_staging_archive { ##no critic (Subroutines::ProhibitExcessComplexi
   #
   # We should deal with lane-level merges here - TODO.
   #
-  if ( $query->option == $LANES || ($query->option == $ALL && !$merged) ) {
-    push @dirs, $old_style ? $old_qc_dir : @lane_qc_dirs;
+  if ( $query->option == $LANES || $query->option == $ALLALL ||
+      ($query->option == $ALL && !$merged) ) {
+    my $collection = $self->load_from_path(@lane_globs, $query);
+    push @results, @{$collection->results};
   }
-
-  if (@dirs) {
-    push @collections, $self->load_from_path(@dirs, $query);
-  }
-  my $collection = npg_qc::autoqc::results::collection->join_collections(@collections);
 
   #####
-  # Filter results for one-component compositions by position.
-  # 
-  if (@{$query->positions} && $old_style && $collection->size &&
-       ($query->option == $LANES || $query->option == $ALL)) {
-    my @in = grep { $_->num_components > 1 || $lh{$_->position} }
-             @{$collection->results};
-    $collection = npg_qc::autoqc::results::collection->new();
-    $collection->add(\@in);
+  # Filter results by position.
+  #
+  if (@{$query->positions} && @results) {
+    my %lh = map { $_ => 1 } @{$query->positions};
+    @results = grep { any { exists $lh{$_->position} } $_->composition->components_list }
+               @results;
   }
+
+  my $collection = npg_qc::autoqc::results::collection->new();
+  $collection->add(\@results);
 
   return $collection;
 }
@@ -393,106 +372,6 @@ sub load_from_db {
   return $c;
 }
 
-=head2 load_fastqcheck_content
-
-Returns fastqcheck file content as a string for a lane entity defined
-by the argument query object. Takes an optional second argument, read name,
-which defaults to a forward read. Valid values for the read name are
-'forward, 'reverse and 'index'.
-
-Returns an undefined value if the content is not found either in the
-database or on staging.
-
-  my $content = $obj->load_fastqcheck_content($query);
-  my $content = $obj->load_fastqcheck_content($query, 'reverse');
-
-=cut
-
-sub load_fastqcheck_content {
-  my ($self, $query, $read) = @_;
-
-  defined $query or croak 'Query object i srequired';
-  if ($query->option != $LANES) {
-    croak q[Fastqcheck file content can be loaded for lanes only];
-  }
-  if (scalar @{$query->positions} != 1) {
-    croak q[Fastqcheck file content can be loaded for one lane only];
-  }
-
-  $read ||= 'forward';
-  if (!exists $READ_NAME_MAPPING{$read}) {
-    croak qq[Unknow read value $read];
-  }
-
-  my $content;
-  if ($self->use_db && $query->db_qcresults_lookup) {
-    $content = $self->_fqchck_load_from_db($query, $read);
-  }
-  if (!$content) {
-    $content = $self->_fqchck_load_from_staging($query, $read);
-  }
-
-  return $content;
-}
-
-=head2 load_fastqcheck_content_from_path
-
-Returns fastqcheck file content as a string  for a lane entity defined
-by the argument query object. Looks for fastqcheck files in the directories
-specified by the second argument. Takes an optional third argument,
-read name, see details in the documentation for load_fastqcheck_content
-method.
-
-Returns an undefined value if the file for the entiry is not found.
-
-  my @paths = qw/path1 path2/;
-  my $content = $obj->load_fastqcheck_content_from_path($query, \@paths);
-  my $content = $obj->load_fastqcheck_content_from_path($query, \@paths,
-                                                        'reverse');
-
-=cut
-
-sub load_fastqcheck_content_from_path {
-  my ($self, $query, $paths, $read) = @_;
-
-  defined $query or croak q[Query object needed];
-  ($paths and @{$paths}) or croak q[Path needed];
-  $read ||= 'forward';
-  if (!exists $READ_NAME_MAPPING{$read}) {
-    croak qq[Unknow read value $read];
-  }
-
-  my $position = $query->positions->[0];
-  my @files = ();
-  foreach my $path (@{$paths}) {
-    my $file = join q[/], $path, sprintf '%i_%i_%s.fastqcheck',
-                                        $query->id_run,
-                                        $position,
-                                        $READ_NAME_MAPPING{$read};
-    if (-f $file) {
-      push @files, $file;
-    } elsif ($read eq 'forward') {
-      $file = join q[/], $path, sprintf '%i_%i.fastqcheck',
-                                        $query->id_run,
-                                        $position;
-      if (-f $file) {
-        push @files, $file;
-      }
-    }
-  }
-
-  my $content;
-  if (scalar @files > 1) {
-    carp q[Too many fastqcheck files match the query];
-  } else {
-    if (@files) {
-      $content = slurp $files[0];
-    }
-  }
-
-  return $content;
-}
-
 =head2 json_file2result_object
 
 Reads an argument JSON file and converts the content into in-memory autoqc
@@ -535,33 +414,6 @@ sub json_file2result_object {
   return $result;
 }
 
-sub _fqchck_load_from_db {
-  my ($self, $query, $read) = @_;
-  my $where = {split => 'none', tag_index => $NO_TAG_INDEX};
-  $where->{'id_run'}   = $query->id_run;
-  $where->{'position'} = $query->positions->[0];
-  $where->{'section'}  = $read;
-  my $row = $self->qc_schema()->resultset('Fastqcheck')->search($where)->next();
-  if ($row) {
-    return $row->file_content;
-  }
-  return;
-}
-
-sub _fqchck_load_from_staging {
-  my ($self, $query, $read) = @_;
-  my $rfs = $self->_runfolder_obj($query);
-  my $content;
-  if ($rfs) {
-    my $position = $query->positions->[0];
-    my $location = _is_old_style_rf($rfs)
-                   ? $rfs->archive_path
-                   : join q[/], $rfs->archive_path, 'lane'.$position;
-    $content = $self->load_fastqcheck_content_from_path($query, [$location], $read);
-  }
-  return $content;
-}
-
 sub _runfolder_obj {
   my ($self, $query) = @_;
 
@@ -579,23 +431,6 @@ sub _runfolder_obj {
   };
 
   return $rfs;
-}
-
-sub _is_old_style_rf {
-  my $rf_obj = shift;
-  return -e $rf_obj->qc_path;
-}
-
-sub _lane_dirs_glob {
-  my ($self, $archive_path, $query) = @_;
-  my $glob = join q[/], $archive_path, 'lane';
-  if ($query && @{$query->positions}) {
-    my $p_string = join q[,], @{$query->positions};
-    $glob .= qq[{$p_string}];
-  } else {
-    $glob .= q[*];
-  }
-  return $glob;
 }
 
 sub _query_obj {
@@ -659,7 +494,7 @@ __END__
 
 =head1 LICENSE AND COPYRIGHT
 
-Copyright (C) 2018 GRL
+Copyright (C) 2019 GRL
 
 This file is part of NPG.
 

@@ -1,5 +1,6 @@
 LIST OF CHANGES FOR NPG-QC PACKAGE
 
+- the first commit of a new qc check illumina_analysis with no database changes
 
 release 66.2
  - SeqQC: heatmaps from samtools stats files as a source

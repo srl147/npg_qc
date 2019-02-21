@@ -48,6 +48,7 @@ my $temp = tempdir( CLEANUP => 1);
                     rna_seqc         => 1,
                     bcfstats         => 1,
                     samtools_stats   => 1,
+                    illumina_analysis => 1,
                    };
     my $actual;
     my @checks = @{$c->checks_list};

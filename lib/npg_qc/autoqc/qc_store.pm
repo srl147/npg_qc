@@ -83,7 +83,10 @@ has 'checks_list' => (
   is       => 'ro',
   required => 1,
   default  => sub {
-    return npg_qc::autoqc::results::collection->new()->checks_list();
+    # temporarily exclude the illumina_analysis check as we haven't created the database table yet
+    my @checks = @{npg_qc::autoqc::results::collection->new()->checks_list()};
+    @checks = grep {!/illumina_analysis/} @checks;
+    return \@checks;
   },
 );
 

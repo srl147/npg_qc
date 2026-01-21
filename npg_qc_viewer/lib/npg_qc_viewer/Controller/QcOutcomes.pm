@@ -4,7 +4,7 @@ use Moose;
 use namespace::autoclean;
 use Try::Tiny;
 use Carp;
-use List::MoreUtils qw/ any /;
+use List::MoreUtils qw/ any uniq /;
 
 use npg_tracking::glossary::rpt;
 use npg_tracking::glossary::composition::factory::rpt_list;
@@ -148,45 +148,63 @@ sub _update_outcomes {
     }
   }
 
+  if ($error) {
+    $self->status_forbidden($c, 'message' => $error,);
+    return;
+  }
+
   # Present only in test scenario
   delete $data->{'user'};
   delete $data->{'password'};
 
-  if ($error) {
-    $self->status_forbidden($c, 'message' => $error,);
-  } else {
+  try {
+    my $id_run = _id_run_from_data($data);
+    # The run should be registered in the tracking database.
+    my $tracking_run = $c->model('NpgDB')->schema()->resultset('Run')
+                         ->find($id_run);
+    if (!$tracking_run) {
+      croak "Run $id_run is not registered in the tracking database";
+    }
 
-    try {
-      my $seq_outcomes = $data->{$SEQ_OUTCOMES} || {};
-      my $lane_info = keys %{$seq_outcomes} ?
-        $self->_lane_info($c->model('MLWarehouseDB'), $seq_outcomes) : {};
+    # Rules for saving manual QC outcomes differ between sequencing platforms.
+    # The controller has access to the tracking database, we can get the
+    # name of the sequencing instrument's manufacturer. 
+    my $instrument = $tracking_run->instrument();
+    my $manufacturer = $instrument->manufacturer_name();
 
-      my $outcomes = npg_qc::mqc::outcomes->new(
-                       qc_schema => $c->model('NpgQcDB')->schema())
-                     ->save($data, $username, $lane_info);
+    my $seq_outcomes = $data->{$SEQ_OUTCOMES} || {};
+    my @lane_rps = keys %{$seq_outcomes};
+    my $lane_info = (@lane_rps && $instrument->manufacturer_is_Illumina())
+      ? $self->_lane_info($c->model('MLWarehouseDB'), \@lane_rps)
+      : {};
 
-      $seq_outcomes = $outcomes->{$SEQ_OUTCOMES} || {};
-      $self->_update_runlanes($c, $seq_outcomes, $username);
+    # Save the outcomes.
+    my $outcomes = npg_qc::mqc::outcomes->new(
+      qc_schema => $c->model('NpgQcDB')->schema()
+    )->save($data, $username, $lane_info, $manufacturer);
 
-      $self->status_ok($c, 'entity' => $outcomes,);
-    } catch {
-      my $e = $_;
-      if (ref $e eq 'DBIx::Class::Exception') {
-        $e = $e->{'msg'} || q[]; # This exception class does not provide
-                                 # any accessors.
-      }
-      $self->status_bad_request($c, 'message' => $e,);
-    };
-  }
+    $seq_outcomes = $outcomes->{$SEQ_OUTCOMES} || {};
+    # Update the status of the lanes. Run status might get updated as well.
+    $self->_update_runlanes($c, $seq_outcomes, $username);
+
+    $self->status_ok($c, 'entity' => $outcomes,);
+  } catch {
+    my $e = $_;
+    if (ref $e eq 'DBIx::Class::Exception') {
+      $e = $e->{'msg'} || q[]; # This exception class does not provide
+                               # any accessors.
+    }
+    $self->status_bad_request($c, 'message' => $e,);
+  };
 
   return;
 }
 
 sub _lane_info {
-  my ($self, $mlwh_schema, $seq_outcomes) = @_;
+  my ($self, $mlwh_schema, $lane_rpts) = @_;
 
   my $info = {};
-  foreach my $rpt_key ( keys %{$seq_outcomes} ) {
+  foreach my $rpt_key ( @{$lane_rpts} ) {
     $info->{$rpt_key} = $mlwh_schema->tags4lane(
       npg_tracking::glossary::rpt->inflate_rpt($rpt_key));
   }
@@ -225,8 +243,27 @@ sub _update_runlanes {
   return;
 }
 
+sub _id_run_from_data {
+  my $data = shift;
+
+  # In the SeqQC viewer in manual QC context all data will belong to
+  # the same run. Enforce this.
+  my @rpts = map { keys %{$data->{$_}} } keys %{$data};
+  my @id_runs = uniq map { $_->{'id_run'} }
+                map { @{npg_tracking::glossary::rpt->inflate_rpts($_)} }
+                @rpts;
+  if (@id_runs == 0) {
+    croak 'No QC outcomes in manual QC context';
+  }
+  if (@id_runs != 1) {
+    croak 'Multiple runs in manual QC context';
+  }
+
+  return $id_runs[0];
+}
 
 __PACKAGE__->meta->make_immutable;
+
 1;
 
 __END__
@@ -271,7 +308,7 @@ Marina Gourtovaia E<lt>mg8@sanger.ac.ukE<gt>
 
 =head1 LICENSE AND COPYRIGHT
 
-Copyright (C) 2017 Genome Research Ltd.
+Copyright (C) 2016, 2017, 2018, 2025 Genome Research Ltd.
 
 This file is part of NPG software.
 

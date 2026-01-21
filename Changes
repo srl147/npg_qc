@@ -1,5 +1,239 @@
 LIST OF CHANGES FOR NPG-QC PACKAGE
 
+ - Remove hardcoded mod_proxy path in httpd_seqqc.conf
+ - Bug fix in npg_qc::ultimagen::run_stats in tag_metrics autoqc result
+   generation: perfect match and perfect matches pf counts are set to zero
+   for tag zero since by definition tag zero is a container for unmatched
+   reads. This fixes a number of downstream calculations.
+ - Added reporting of MQC outcomes for Ultimagen.
+
+release 76.0.0 (2026-01-09)
+ - Updated the SOP for changing manual QC outcomes with an example of failing
+   a previously passed lane.
+ - npg_qc::autoqc::role::tag_metrics - converted a private method
+   '_total_reads_count' to public 'total_reads_count'. This is driven by the
+   need to compute the count of raw input read values for Ultima Genomics runs.
+ - Remove = in gatk pulldown metrics argument options (as to be deprecated) 
+ - Enabled manual QC of Ultima Genomics runs.
+   - Flagged a single Ultima Genomics run to the SeqQC template so that manual QC
+     widgets can be displayed for such a run.
+   - The signature of the npg_qc::mq::outcomes 'save' method is changed.
+     Previously the fourth optional argument was a boolean flag denoting a non-
+     Illumina run. Now this argument is a string, the name of the sequencing
+     instrument manufacturer. The argument is still optional and defaults to
+     'Illumina'. This change allows for establishing per-platform rules for
+     finalising QC outcomes. A rule for QC outcomes for Ultima Genomics data is
+     added. Rules for Illumina and Element Biosciences data have not changed.
+   - npg_qc_viewer::Controller::QcOutcomes is refactored in order to reliably
+     determine sequencing instrument manufacturer name and pass it to 'save'
+     method of npg_qc::mq::outcomes class. The following  previously implied
+     assumptions are enforced:
+     - all QC outcome should belong to the same sequencing run,
+     - the sequencing run should be registered in the tracking database.
+     The flow and layout of the code is improved making the code more readable.
+ - Added a parser for Ultima Genomics stats.
+   - Added stand-alone parsers for Ultima Genomics manifest
+     npg_qc::ultimagen::manifest and [RunId]_LibraryInfo.xml files
+     npg_qc::ultimagen::library_info. Both parsers pesent the same interface.
+     They build the 'samples' attribute, which is a list of
+     npg_qc::ultimagen::sample objects. The npg_qc::ultimagen::sample class is
+     a representation of an Ultima Genomics sample.
+   - Added a source-agnostic (manifest or [RunId]_LibraryInfo.xml) retriever for
+     sample information npg_qc::ultima::sample_retriever. It is expected that
+     this class will be used by mlwh loader for Ultima Genomics data. 
+   - Added a script ultimagen_runstats_parser.pl for parsing Ultima Genomics
+     stats files that are availale in the run folder. The script produces
+     autoqc tag_metrics and qX_yield results. Information about target samples
+     is read either from a manifest or from [RunId]_LibraryInfo.xml
+ - Add apache configuration to optionally run the service behind a reverse
+   proxy with http port working only as a rewrite rule to tls port
+   - update build configuration to copy apache configuration to install target
+ - CI updates
+
+release 75.1.0 (2025-11-19)
+ - Added two new attributes, yield1_total and yield2_total, to
+   npg_qc::autoqc::results::qX_yield. Extended 'execute' method in
+   npg_qc::autoqc::checks::qX_yield to compute and assign values of the
+   new attributes. The new attributes are yields for forward and reverse
+   reads respectively.
+ - Added methods for computing yields as percent.
+ - Added columns yield1_total and yield2_total to qx_yield database table,
+   reflected the change in ORM. 
+
+release 75.0.1 (2025-11-12)
+ - fixes for Gitlab CI configuration
+ - CI updates
+
+release 75.0.0 (2025-10-09)
+ - Ensured consistency in the calculation of the coefficient of variance
+   for tag metrics data. Only reads that passed purity filter should be
+   used as input.
+ - Removed all code related to the MQC skipper functionality. The projects
+   this code was used for are finished.
+ - CI updates
+
+release 74.6.0 (2025-09-02)
+ - SeqQC viewer code refactored to propagate Elembio LIMS data to UI.
+ - Droped dependency of deplexing stats generator for Elembio on
+   npg_tracking::Schema by using RunParameters.json parser directly.
+
+release 74.5.0 (2025-08-12)
+ - add scripts for incremental update of genotype QC check genotype data from
+   iRODS-archived Fluidigm results
+
+release 74.4.0 (2025-08-06)
+ - Dropped special SeqQC provisions for GCLP runs. The fact that the pages
+   will have links to non-existing Sequencescape LIMS entities does not
+   matter (lab work went though now decommissioned LIMS).
+ - Added reporting of MQC outcomes for Elembio lanes.
+ - Bugfix in parsing Elembio RunManifest.json when different samples are
+   sequenced in two lanes of the same run.
+
+release 74.3.0 (2025-07-22)
+ - Changes to npg_qc::elembio::tag_metrics_generator 
+   - An Elembio lane might contain multiple libraries for the same
+     sample. A tag index is assigned per sample, therefore multiple
+     barcode sequences might correspond to the same tag index.
+     npg_qc::autoqc::results::tag_metrics class allows for one
+     barcode per tag index. One of the barcodes is chosen to
+     represent a set of barcodes. This change flags the presence
+     of other barcodes by appending the number of the remaining
+     barcodes with a plus sign to the barcode string. Example:
+     ATCGATCG-ATCGAAAA[+143]
+   - A comment is added to npg_qc::autoqc::results::tag_metrics
+     object to explain the above tag sequence notation if it is
+     present.
+   - Control samples are identified by their name and flagged.
+     Examples: GCACATAGTC-GACTACTAGC(CTRL) or ATGTCGCTAG-CTAGCTCGTA[+3](CTRL).
+   - Where there is one control sample per lane, spiked_control_index
+     attribute of npg_qc::autoqc::results::tag_metrics object is set, making
+     calculations of the coefficient of variance and highlighting of
+     underrepresented tags more accurate.
+   - More properties are set for tag zero in tag_metrics object
+     to make the definition of tag zero for Elembio lanes identical
+     to the one for Illumina lanes.
+   - The code is refactored to avoid repetitions and to make
+     convert_run_stats_to_tag_metrics function more concise.
+ - Ensured that computed polonies counts are integers. The float values are
+   rounded down to the nearest integer.
+ - Information about multiple tags per sample representation is added
+   to the tag metrics SeqQC info section.
+
+release 74.2.0 (2025-07-16)
+ - Implemented a library npg_qc::elembio::run_stats for parsing Elembio
+   RunStats.json files. These files are generated by bases2fastq, Elembio's
+   demultiplexer.
+ - Implemented a script elembio_runstats_parser.pl that uses data in Elembio's
+   RunStats.json file to generate per-lane JSON files for
+   npg_qc::autoqc::results::tag_metrics objects.
+ - Add optional tile limits to Illumina interop files parsing
+
+release 74.1.0 (2025-06-20)
+ - To allow for lane-level QC assessment of Elembio data in the absence of
+   results of library-level QC results, relaxed the rules for assigning the
+   final QC outcome for a pooled lane for non-Illumina data.
+   - npg_qc::mqc::outcomes 'save' method gets a new optional boolean argument,
+     non_illumina_data, false by default. If this argument is true, at a point
+     of saving a final QC outcome for a lane an attempt to finalise
+     library/plex-level QC outcomes is not made.
+   - SeqQC QcOutcomes controller uses information about the manufacturer of
+     the instrument the sequencing experiment was set up on when updating
+     QC outcomes (see above).
+   - For an Elembio run the template for rendering a row in a SeqQC summary
+     table always creates a placeholder for MQC controls.
+   Some of these adjustments will have to be removed or refined in future when
+   library-level MQC is enabled for Elembio data.
+
+release 74.0.2 (2025-02-20)
+ - Replace mark docker image with mark golang executable from github,
+   on ISG's docker image, for documentation publishing
+
+release 74.0.1 (2024-12-17)
+ - Fix perlbrew installation by installing libdevel-patchperl-perl in runner
+ - Fixes/updates for lane-level RoboQC lane-level assessment:
+    - Excluded study-specific lane-lane assessment in npg_qc::autoqc::check::review
+      This helps to avoid uncertainty in evaluating lanes where samples belong to
+      different studies at a price of not being able to perform study-specific
+      evaluation of one-library lanes.
+    - Updated the expression evaluator to allow for multiple types of
+      result objects to be used in a single expression.
+
+release 74.0.0 (2024-12-02)
+ - npg_qc::autoqc::qc_store - changed loading of ORM classes into memory
+   to on demand at run time.
+ - Added lane-level assessment to RoboQC:
+    - Extended npg_qc::Schema::Result::Review class to enable saving of
+      sequencing (lane-level) QC outcomes to database
+    - Extended npg_qc::autoqc::check::review to enable lane-level assessment
+      and documented the new feature.
+    - Made redundant 'qc_type' key of the 'robo' configuration.
+    - Fixed a bug in creating a list of class names in
+      npg_qc::autoqc::check::review.
+      A list of names for result classes to be loaded was inferred
+      from all criteria in the 'robo' section under consideration.
+      Until now this did not pesent a problem since even when a number
+      of different criteria sections were present in the study RoboQC
+      section of the configuration file, it was possible to load all of
+      the AutoQC results for any given entity.
+      The bug is revealed when lane-level assessment is added to
+      the 'robo' section under the 'default' configuration. This
+      type of assessment might require presence of lane-level autoqc
+      results for checks that are never performed on sample level,
+      'tag_metrics' check being the most obvious example.
+      The fix is to infer the list of class names from the criteria,
+      which are going to be evaluated for the entity, rather than
+      from a collection of criteria from the whole 'robo' section.
+ - Added instructions for running a standard dev server
+ - Move from Miniconda to Miniforge
+
+release 73.0.0 (2024-10-24)
+ - Removed from the repository unused test data.
+ - npg_qc::autoqc::check::review:
+   1. Previously the code allowed for an empty applicability_criteria hash,
+      which resulted in a particular set of QC criteria being applied to every
+      and any product. Very early on this was an intended behaviour for UKB
+      data. The main filter was the study id. The default section of the product
+      configuration file does not have an external filter, so there is a real
+      danger of the review check being run indiscriminately for any product.
+      While this will never be an intention, small errors in the YML file might
+      have this effect.
+   2. Ability to set UQC outcomes was introduced for the Heron project. This
+      functionality was never used and is unlikely to be used in future, it is
+      now removed.
+
+release 72.2.1 (2024-10-04)
+ - Added .github/dependabot.yml file to auto-update GitHub actions
+ - GitHub CI - updated deprecated v2 runner action to v3
+ - docs
+   - automated creation/update of confluence pages for docs
+ - Following a release on 07/09/2024, see https://metacpan.org/dist/App-perlbrew/changes
+   the checksum of the script served by https://install.perlbrew.pl had changed.
+   https://install.perlbrew.pl is a redirect to raw
+   https://github.com/gugod/App-perlbrew/blob/master/perlbrew-install, so
+   the change originates from GitHub and can be trusted. Our CI flow compares
+   the checksum of the downloaded script to the expected value. We now store
+   an updated expected checksum value, which corresponds to the latest release.
+ - npg_qc::autoqc::check::review:
+   The forthcoming lane-level evaluations are impossible if the code continues
+   to error when library_type attribute is not defined for the entity under
+   consideration. The library_type attribute is now set when possible, no error
+   if it is undefined.
+
+release 72.2.0 (2024-08-30)
+ - npg_qc::autoqc::check::review:
+   1. To enable access to information about a sequencing run (from RunInfo.xml,
+      {r,R}unParameters.xml), added an optional 'runfolder_path' attribute.
+      The attribute will have to be set by the caller.
+   2. Added a new applicability criteria type - 'sequencing_run'
+   3. To avoid running the review check unnecessarily in the pipeline context,
+      moved ROBO criteria validation to the can_run method.
+   4. Introduced an option of defining the ROBO section within the default
+      section of the product configuration file.
+ - Explained QC outcome change for complex products (merged)
+
+release 72.1.2 (2024-08-05)
+ - handle cases where the same tag sequence is seen in both index reads
+
 release 72.1.1 (2024-05-24)
  - Removing Tidyp dependency from CI
 

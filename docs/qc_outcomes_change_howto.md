@@ -1,9 +1,68 @@
+<!-- Space: NPG -->
+<!-- Parent: Illumina Sequencing -->
+<!-- Title: Guidance for Changing QC Outcomes -->
+
+<!-- Macro: :box:([^:]+):([^:]*):(.+):
+     Template: ac:box
+     Icon: true
+     Name: ${1}
+     Title: ${2}
+     Body: ${3} -->
+
+:box:info:Note:This page is automatically generated; any edits will be overwritten:
+
+###### Repository information
+
+<!-- Include: includes/repo-metadata.md -->
+
 # Guidance for Changing QC Outcomes
 
 - Use the correct RT ticket number.
 - Set id_run, position and tag_index accordingly.
 - Wrap database changes into a transaction, which initially should have
   a clause to fail it so that it can be tried out (see some examples below).
+
+All listed below procedures were originally written for products containing
+one component. Existing procedures for changing the already existing QC outcomes
+should also work for products containing multiple components as long as these
+components are from the same run and are for the same tag index. Use any lane
+number (position) that went into the merged product. For example, for a product
+described by JSON below
+
+```json
+{
+  "__CLASS__": "npg_tracking::glossary::composition-101.3.0",
+  "components": [
+    {
+      "__CLASS__": "npg_tracking::glossary::composition::component::illumina-101.3.0",
+      "id_run": 49404,
+      "position": 7,
+      "tag_index": 1
+    },
+    {
+      "__CLASS__": "npg_tracking::glossary::composition::component::illumina-101.3.0",
+      "id_run": 49404,
+      "position": 8,
+      "tag_index": 1
+    }
+  ]
+}
+```
+
+use the following expression for a search when toggling the QC outcome
+
+```
+my $rs=npg_qc::Schema->connect()->resultset("MqcLibraryOutcomeEnt")
+  ->search_autoqc({id_run=>49494,position=>7,tag_index=>1});
+```
+
+The custom `search_autoqc` method returns a resultset containing QC outcomes for
+products which contain a component with position 7 and tag_index 1, which will
+be the merged product described by the above JSON. If the QC database records
+are correct, the resultset should contain one row. The same resultset is
+returned if 8 is used as the value of the position. There should not be any need
+to repeat the process for every position that went into the merge and in a case
+of a toggle this would be wrong.
 
 ## Toggle the outcome of a single library
 
@@ -90,6 +149,60 @@ foreach my $l (1..4) {
 print Dumper [$outcomes];
 my $o = npg_qc::mqc::outcomes->new(qc_schema => npg_qc::Schema->connect());
 $o->save($outcomes, $ENV{USER}, $info);
+```
+
+## Failing previously passed merged lanes
+
+This is a real example for RT#830027
+Change lane numbers, run id, ticket number.
+
+In the example below we have to fail lanes 1 and 2. If we were asked to fail
+merged lanes 3,4,5, we could use any lane number, say 3, when searching for
+library-level outcomes for merged entities. However, we'd have to find and toggle
+sequencing level outcomes for each of three lanes (3,4,5) individually. 
+
+```
+#!/usr/bin/env perl
+
+use strict;
+use warnings;
+use npg_qc::Schema;
+
+my $s = npg_qc::Schema->connect();
+my $id_run = XXXXXX;
+my $query = {id_run=>$id_run,position=>1};
+my $rt = "RT#YYYYYY";
+my $user = $ENV{"USER"};
+
+# Use transaction.
+$s->txn_do( sub {
+  # The lanes are merged
+  my $rs=$s->resultset("MqcLibraryOutcomeEnt")->search_autoqc($query);
+  while (my $row=$rs->next) {
+    print $row->seq_composition->create_composition->freeze() .
+      " current outcome: ".$row->mqc_outcome->short_desc;
+    $row->update_outcome({"mqc_outcome" => "Undecided final"}, $user, $rt);
+    print "New outcome: ".$row->mqc_outcome->short_desc;
+  }
+
+  # Individually toggle  manual QC outcome for each lane which went into a merge.
+  foreach my $lane ((1, 2)) {
+    my $rs=$s->resultset("MqcOutcomeEnt")->search({id_run=>$id_run,position=>$lane});
+    if ($rs->count == 1) {
+      my $row=$rs->next;
+      print "Lane $lane current outcome: ".$row->mqc_outcome->short_desc;
+      $row->toggle_final_outcome($user, $rt);
+      print "New outcome: ".$row->mqc_outcome->short_desc;
+    } else {
+      die "no result or multiple results"
+    }
+  }
+  # Comment out the next statement when ready to update the values.
+  die 'End of transaction, deliberate error';
+});
+
+1;
+
 ```
 
 ## Create `pass` for a lane and all its samples

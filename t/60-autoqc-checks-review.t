@@ -1,6 +1,6 @@
 use strict;
 use warnings;
-use Test::More tests => 11;
+use Test::More tests => 13;
 use Test::Exception;
 use Test::Warn;
 use File::Temp qw/tempdir/;
@@ -8,17 +8,19 @@ use File::Copy;
 use File::Slurp qw/read_file write_file/;
 use JSON qw/from_json to_json/;
 use List::MoreUtils qw/any/;
+use Archive::Extract;
 
 use npg_testing::db;
-use npg_qc::autoqc::qc_store;
 use npg_tracking::glossary::composition;
 use st::api::lims;
+use npg_qc::autoqc::db_loader;
 
 use_ok('npg_qc::autoqc::checks::review');
 
 my $dir = tempdir( CLEANUP => 1 );
 my $test_data_dir = 't/data/autoqc/review';
 my $conf_file_path = "$test_data_dir/product_release.yml";
+my $rf_path = 't/data/autoqc/200117_A00715_0080_BHY7T3DSXX';
 
 local $ENV{NPG_CACHED_SAMPLESHEET_FILE} =
     't/data/autoqc/review/samplesheet_27483.csv';
@@ -31,8 +33,12 @@ my $criteria_list = [
   'verify_bam_id.freemix < 0.01'
 ];
 
-subtest 'construction object, deciding whether to run' => sub {
-  plan tests => 27;
+my $schema =  Moose::Meta::Class->create_anon_class(
+  roles => [qw/npg_testing::db/])->new_object()
+                                 ->create_test_db(q[npg_qc::Schema]);
+
+subtest 'constructing object, deciding whether to run' => sub {
+  plan tests => 34;
 
   my $check = npg_qc::autoqc::checks::review->new(
     conf_path => $test_data_dir,
@@ -40,13 +46,27 @@ subtest 'construction object, deciding whether to run' => sub {
     rpt_list  => '27483:1:2');
   isa_ok ($check, 'npg_qc::autoqc::checks::review');
   isa_ok ($check->result, 'npg_qc::autoqc::results::review');
+
+  lives_ok { npg_qc::autoqc::checks::review->new(
+    conf_path      => $test_data_dir,
+    qc_in          => $test_data_dir,
+    runfolder_path => $test_data_dir,
+    rpt_list       => '27483:1:2;27483:2:2')
+  } 'object created OK for components from the same run';
+  throws_ok { npg_qc::autoqc::checks::review->new(
+    conf_path      => $test_data_dir,
+    qc_in          => $test_data_dir,
+    runfolder_path => $test_data_dir,
+    rpt_list       => '27483:1:2;27484:2:2')
+  } qr/'runfolder_path' attribute should not be set/,
+    'error creating an object for components from different runs';
+
   my $can_run;
   warnings_like { $can_run = $check->can_run }
-    [qr/Study config not found for/],
+    [qr/Study-specific RoboQC config not found/, qr/RoboQC configuration is absent/],
     'can_run is accompanied by warnings';
   ok (!$can_run, 'can_run returns false - no study config');
-  is ($check->result->comments,
-    'Product configuration for RoboQC is absent',
+  like ($check->result->comments, qr/RoboQC configuration is absent/,
     'reason logged');
   lives_ok { $check->execute() } 'cannot run, but execute method runs OK';
   is ($check->result->pass, undef,
@@ -59,11 +79,10 @@ subtest 'construction object, deciding whether to run' => sub {
     qc_in     => $test_data_dir,
     rpt_list  => '27483:1:2');
   warnings_like { $can_run = $check->can_run }
-    [qr/robo_qc section is not present for/],
+    [qr/Study-specific RoboQC config not found/, qr/Review check cannot be run/],
     'can_run is accompanied by warnings';
   ok (!$can_run, 'can_run returns false - no robo config');
-  is ($check->result->comments,
-    'Product configuration for RoboQC is absent',
+  is ($check->result->comments, 'RoboQC configuration is absent',
     'reason logged');
 
   $check = npg_qc::autoqc::checks::review->new(
@@ -93,10 +112,10 @@ subtest 'construction object, deciding whether to run' => sub {
     qc_in     => $test_data_dir,
     rpt_list  => '27483:1:2');
   throws_ok { $check->can_run }
-    qr/should have the acceptance_criteria key defined/,
+    qr/should have both the applicability_criteria and acceptance_criteria key/,
     'error in can_run when acceptance criteria not defined';
   throws_ok { $check->execute }
-    qr/should have the acceptance_criteria key defined/,
+    qr/should have both the applicability_criteria and acceptance_criteria key/,
     'error in execute when acceptance criteria not defined';
   
   $check = npg_qc::autoqc::checks::review->new(
@@ -104,11 +123,11 @@ subtest 'construction object, deciding whether to run' => sub {
     qc_in     => $test_data_dir,
     rpt_list  => '27483:1:2');
   throws_ok { $check->can_run }
-    qr/should have the applicability_criteria key defined/,
+    qr/should have both the applicability_criteria and acceptance_criteria key/,
     'error in can_run when applicability criteria not defined ' .
     'in one of multiple criterium objects';
   throws_ok { $check->execute }
-    qr/should have the applicability_criteria key defined/,
+    qr/should have both the applicability_criteria and acceptance_criteria key/,
     'error in execute when applicability criteria not defined ' .
     'in one of multiple criterium objects';
 
@@ -129,23 +148,57 @@ subtest 'construction object, deciding whether to run' => sub {
   } 'can set lims via the constructor';
   ok ($check->can_run, 'can_run returns true');
 
+  # No robo config in the default section, all samples belong to the same
+  # study, for which robo config is defined.
+  $check = npg_qc::autoqc::checks::review->new(
+    conf_path => "$test_data_dir/with_criteria",
+    qc_in     => $test_data_dir,
+    rpt_list  => '27483:1'
+  );
+  ok (!$check->can_run, 'can_run returns false for a lane'); 
+
   $check = npg_qc::autoqc::checks::review->new(
     conf_path => "$test_data_dir/no_applicability4single",
     qc_in     => $test_data_dir,
     rpt_list  => '27483:1:2');
-  ok ($check->can_run, 'can_run returns true');
-  ok (!$check->result->comments, 'No comments logged');
+  ok (!$check->can_run, 'can_run returns false');
+  like ($check->result->comments,
+    qr/applicability_criteria is not defined for one of RoboQC criteria/,
+    'Error logged');
 
   $check = npg_qc::autoqc::checks::review->new(
     conf_path => "$test_data_dir/with_na_criteria",
     qc_in     => $test_data_dir,
     rpt_list  => '27483:1:2');
-  ok ($check->can_run, 'can_run returns true');
-  ok (!$check->result->comments, 'No comments logged');
+  ok (!$check->can_run, 'can_run returns false');
+  is ($check->result->comments,
+    'None of the RoboQC applicability criteria is satisfied',
+    'Comment logged');
+
+  local $ENV{NPG_CACHED_SAMPLESHEET_FILE} =
+    't/data/autoqc/review/samplesheet_29524.csv';
+
+  $check = npg_qc::autoqc::checks::review->new(
+    conf_path => "$test_data_dir/no_known_applicability_type",
+    qc_in     => $test_data_dir,
+    rpt_list  => '27483:1:2');
+  ok (!$check->can_run, 'can_run returns false');
+  like ($check->result->comments,
+    qr/None of known applicability type criteria is defined/,
+    'Error logged');
+
+  $check = npg_qc::autoqc::checks::review->new(
+    conf_path => "$test_data_dir/lims_applicability_empty",
+    qc_in     => $test_data_dir,
+    rpt_list  => '27483:1:2');
+  ok (!$check->can_run, 'can_run returns false');
+  like ($check->result->comments,
+    qr/lims type applicability criteria is not defined/,
+    'Error logged');    
 };
 
 subtest 'caching appropriate criteria object' => sub {
-  plan tests => 3;
+  plan tests => 2;
   
   my $check = npg_qc::autoqc::checks::review->new(
     conf_path => "$test_data_dir/with_criteria",
@@ -156,17 +209,11 @@ subtest 'caching appropriate criteria object' => sub {
     'criteria parsed correctly');
 
   $check = npg_qc::autoqc::checks::review->new(
-    conf_path => "$test_data_dir/no_applicability4single",
-    qc_in     => $test_data_dir,
-    rpt_list  => '27483:1:2');
-  is_deeply ($check->_criteria, {'and' => $criteria_list},
-    'criteria parsed correctly');
-
-  $check = npg_qc::autoqc::checks::review->new(
     conf_path => "$test_data_dir/with_na_criteria",
     qc_in     => $test_data_dir,
-    rpt_list  => '27483:1:2');
-  is_deeply ($check->_criteria, {}, 'empty criteria hash')
+    rpt_list  => '27483:1:2'
+  );
+  is_deeply ($check->_criteria, {}, 'empty criteria hash');
 };
 
 subtest 'execute when no criteria apply' => sub {
@@ -179,7 +226,8 @@ subtest 'execute when no criteria apply' => sub {
   lives_ok { $check->execute }
     'no error in execute when no criteria apply';
   my $result = $check->result;
-  is ($result->comments, 'RoboQC is not applicable',
+  is ($result->comments,
+    'None of the RoboQC applicability criteria is satisfied',
     'correct comment logged');
   is_deeply ($result->criteria, {}, 'empty criteria hash');
   is_deeply ($result->qc_outcome, {}, 'empty qc_outcome hash');
@@ -187,24 +235,35 @@ subtest 'execute when no criteria apply' => sub {
 };
 
 subtest 'setting options for qc store' => sub {
-  plan tests => 4;
+  plan tests => 7;
 
   my $check = npg_qc::autoqc::checks::review->new(
-    conf_path => "$test_data_dir/with_criteria",
-    qc_in     => $test_data_dir,
-    rpt_list  => '27483:1:2');
-  my $expected_class_names = [qw/bam_flagstats bcfstats verify_bam_id/];
+    conf_path      => "$test_data_dir/with_criteria",
+    qc_in          => $test_data_dir,
+    rpt_list       => '27483:1:2',
+  );
+  my $expected_class_names = [qw/bam_flagstats/];
   is_deeply ($check->_result_class_names, $expected_class_names, 'class names');
   is_deeply ($check->_qc_store->checks_list, $expected_class_names,
     'class names correctly propagated to the qc store object');
-
   ok (!$check->use_db, 'default is not to use the db');
+  is ($check->_qc_schema, undef, 'db schema object is not built');
   ok (!$check->_qc_store->use_db, 
     'db option correctly propagated to the qc store object');
+
+  $check = npg_qc::autoqc::checks::review->new(
+    conf_path      => "$test_data_dir/with_criteria",
+    qc_in          => $test_data_dir,
+    rpt_list       => '27483:1:2',
+    use_db         => 1,
+    _qc_schema     => $schema
+  );
+  ok ($check->_qc_store->use_db, 'option to use db is propagated');
+  is ($check->_qc_store->qc_schema, $schema, 'db schema is propagated when set');
 };
 
 subtest 'finding result - file system' => sub {
-  plan tests => 15;
+  plan tests => 14;
 
   my $expected = 'Expected results for bam_flagstats, bcfstats, verify_bam_id,';
   my $rpt_list = '29524:1:2;29524:2:2;29524:3:2;29524:4:2';
@@ -212,20 +271,14 @@ subtest 'finding result - file system' => sub {
   local $ENV{NPG_CACHED_SAMPLESHEET_FILE} =
     't/data/autoqc/review/samplesheet_29524.csv';
 
-  my $check = npg_qc::autoqc::checks::review->new(
-    conf_path => $test_data_dir,
-    qc_in     => $test_data_dir,
-    rpt_list  => '27483:1:2');
-  throws_ok { $check->_results } qr/$expected found none/, 'no results - error';
-
   # should have all three for the entiry and phix for bam_flagstats and qx_yield
   # and gradually add them to qc_in
-
   for my $name (('29524#2.qX_yield.json',
                  '29524#2_phix.bam_flagstats.json',
                  '29524#7.bam_flagstats.json')) {
     copy "$test_data_dir/$name", "$dir/$name";
     my $c = npg_qc::autoqc::checks::review->new(
+      runfolder_path => $rf_path,
       conf_path => $test_data_dir,
       qc_in     => $dir,
       rpt_list  => $rpt_list);
@@ -234,7 +287,8 @@ subtest 'finding result - file system' => sub {
 
   my $name = '29524#2.bam_flagstats.json';
   copy "$test_data_dir/$name", "$dir/$name";
-  $check = npg_qc::autoqc::checks::review->new(
+  my $check = npg_qc::autoqc::checks::review->new(
+    runfolder_path => $rf_path,
     conf_path => $test_data_dir,
     qc_in     => $dir,
     rpt_list  => $rpt_list);
@@ -244,6 +298,7 @@ subtest 'finding result - file system' => sub {
   $name = '29524#2.verify_bam_id.json';
   copy "$test_data_dir/$name", "$dir/$name";
   $check = npg_qc::autoqc::checks::review->new(
+    runfolder_path => $rf_path,
     conf_path => $test_data_dir,
     qc_in     => $dir,
     rpt_list  => '29524:1:2;29524:2:2;29524:3:2;29524:4:2');
@@ -254,6 +309,7 @@ subtest 'finding result - file system' => sub {
   $name = '29524#2.bcfstats.json';
   copy "$test_data_dir/$name", "$dir/$name";
   $check = npg_qc::autoqc::checks::review->new(
+    runfolder_path => $rf_path,
     conf_path => $test_data_dir,
     qc_in     => $test_data_dir,
     rpt_list  => $rpt_list);
@@ -277,19 +333,12 @@ subtest 'finding results - database' => sub {
     't/data/autoqc/review/samplesheet_29524.csv';
 
   my $rpt_list = '29524:1:2;29524:2:2;29524:3:2;29524:4:2';
-
-  my $schema =  Moose::Meta::Class->create_anon_class(
-    roles => [qw/npg_testing::db/])->new_object()
-                                   ->create_test_db(q[npg_qc::Schema]);
   my $init = {
-    conf_path => $test_data_dir,
-    rpt_list  => $rpt_list,
-    use_db    => 1,
-    _qc_store => npg_qc::autoqc::qc_store->new(
-      use_db      => 1,
-      qc_schema   => $schema,
-      checks_list => [qw/bam_flagstats bcfstats verify_bam_id/]
-    )
+    runfolder_path => $rf_path,
+    conf_path      => $test_data_dir,
+    rpt_list       => $rpt_list,
+    use_db         => 1,
+    _qc_schema     => $schema
   };
   my $check;
   lives_ok { $check = npg_qc::autoqc::checks::review->new($init) }
@@ -359,12 +408,13 @@ subtest 'single expression evaluation' => sub {
                   ];
 
   my $check = npg_qc::autoqc::checks::review->new(
+    runfolder_path => $rf_path,
     conf_path => $test_data_dir,
     qc_in     => $test_data_dir,
     rpt_list  => $rpt_list);
 
   throws_ok {$check->_evaluate_expression('verify_bam.freemix < 0.01')}
-    qr/No autoqc result for evaluation of/,
+    qr/No verify_bam autoqc result for evaluation of/,
     'error if check name is unknown';
   throws_ok {$check->_evaluate_expression('verify_bam_id.freemix_free < 0.01')}
     qr/Can't locate object method \"freemix_free\"/,
@@ -384,53 +434,60 @@ subtest 'single expression evaluation' => sub {
 };
 
 subtest 'evaluation within the execute method' => sub {
-  plan tests => 38;
+  plan tests => 39;
 
   local $ENV{NPG_CACHED_SAMPLESHEET_FILE} =
     't/data/autoqc/review/samplesheet_29524.csv';
   my $rpt_list = '29524:1:2;29524:2:2;29524:3:2;29524:4:2';
 
-  my @check_objects = ();
+  # NovaSeq run is required, MiSeq is given
+  my $o = npg_qc::autoqc::checks::review->new(
+    runfolder_path => 't/data/autoqc/191210_MS2_MiSeq_walk-up_246_A_MS8539685-050V2',
+    conf_path => $test_data_dir,
+    qc_in     => $dir,
+    rpt_list  => $rpt_list
+  );
+  ok (!$o->can_run, 'the check cannot be run');
+  is_deeply($o->_criteria, {}, 'no criteria to evaluate');
+  lives_ok { $o->execute } 'execute method runs OK';
+  is ($o->result->pass, undef, 'result pass attribute is unset');
 
+  my @check_objects = ();
   push @check_objects, npg_qc::autoqc::checks::review->new(
+    runfolder_path => $rf_path,
     conf_path => $test_data_dir,
     qc_in     => $dir,
     rpt_list  => $rpt_list);
   push @check_objects, npg_qc::autoqc::checks::review->new(
-    conf_path => "$test_data_dir/mqc_type",
-    qc_in     => $dir,
-    rpt_list  => $rpt_list);
-  push @check_objects, npg_qc::autoqc::checks::review->new(
-    conf_path => "$test_data_dir/uqc_type",
+    conf_path => "$test_data_dir/lib_type_scalar",
     qc_in     => $dir,
     rpt_list  => $rpt_list);
 
-  my $count = 0;
   foreach my $check (@check_objects) {
     lives_ok { $check->execute } 'execute method runs OK';
     is ($check->result->pass, 1, 'result pass attribute is set to 1');
+    is ($check->result->library_type, 'HiSeqX PCR free',
+      'result library_type attribute is set correctly');
     my %expected = map { $_ => 1 } @{$criteria_list};
     is_deeply ($check->result->evaluation_results(), \%expected,
       'evaluation results are saved');
     my $outcome = $check->result->qc_outcome;
-    if ($count < 2) {
-      is ($outcome->{'mqc_outcome'} , 'Accepted preliminary', 'correct outcome string');
-    } elsif ($count == 2) {
-      is ($outcome->{'uqc_outcome'} , 'Accepted', 'correct outcome string');
-      ok ($outcome->{'rationale'} , 'rationale is set');
-    }
+    is ($outcome->{'mqc_outcome'} , 'Accepted preliminary', 'correct outcome string');
     is ($outcome->{'username'}, 'robo_qc', 'correct process id');
     ok ($outcome->{'timestamp'}, 'timestamp saved');
-    $count++;
   }
 
+  # Undefined library type should not be a problem.
+  my $lane_lims = (st::api::lims->new(id_run=> 29524)->children())[0];
+  is ($lane_lims->library_type, undef, 'library type is undefined on lane level');
   my $check = npg_qc::autoqc::checks::review->new(
-    conf_path => "$test_data_dir/unknown_qc_type",
-    qc_in     => $dir,
-    rpt_list  => $rpt_list);
-  throws_ok { $check->execute }
-    qr/Invalid QC type \'someqc\' in a robo config/,
-    'error if qc outcome type is not recignised';
+    conf_path => $test_data_dir,
+    qc_in     => $test_data_dir,
+    rpt_list  => $rpt_list,
+    lims      => $lane_lims
+  );
+  lives_ok { $check->execute } 'execute method runs OK';
+  is ($check->result->library_type, undef, 'library_type attribute is unset');
 
   my $target = "$dir/29524#2.bam_flagstats.json";
 
@@ -450,6 +507,7 @@ subtest 'evaluation within the execute method' => sub {
 
     $check = npg_qc::autoqc::checks::review->new(
       final_qc_outcome => 1,
+      runfolder_path  => $rf_path,
       conf_path       => $test_data_dir,
       qc_in           => $dir,
       rpt_list        => $rpt_list);
@@ -469,6 +527,54 @@ subtest 'evaluation within the execute method' => sub {
   }  
 };
 
+subtest 'study-specific vs default robo definition' => sub {
+  plan tests => 11;
+
+  local $ENV{NPG_CACHED_SAMPLESHEET_FILE} =
+    't/data/autoqc/review/samplesheet_29524.csv';
+  my $rpt_list = '29524:1:2;29524:2:2;29524:3:2;29524:4:2';
+
+  # robo config in the default section only
+  my $check = npg_qc::autoqc::checks::review->new(
+    runfolder_path => $rf_path,
+    conf_path => "$test_data_dir/default_section",
+    qc_in     => $test_data_dir,
+    rpt_list  => $rpt_list
+  );
+  ok ($check->can_run, 'the check can run');
+  lives_ok { $check->execute } 'execute method runs OK';
+  is ($check->result->pass, 1, 'result pass attribute is set to 1');
+  my %expected = map { $_ => 1 } @{$criteria_list};
+  is_deeply ($check->result->evaluation_results(), \%expected,
+    'evaluation results are saved');
+  is ($check->result->qc_outcome->{'mqc_outcome'} , 'Accepted preliminary',
+    'correct outcome string');
+
+  # robo config in the default section and in the study section (empty)
+  $check = npg_qc::autoqc::checks::review->new(
+    runfolder_path => $rf_path,
+    conf_path => "$test_data_dir/default_and_study_section",
+    qc_in     => $test_data_dir,
+    rpt_list  => $rpt_list
+  );
+  ok ($check->can_run, 'the check cannot run');
+
+  # invalid robo config in the default section, valid in the study section
+  $check = npg_qc::autoqc::checks::review->new(
+    runfolder_path => $rf_path,
+    conf_path => "$test_data_dir/wrong_default_and_study_section",
+    qc_in     => $test_data_dir,
+    rpt_list  => $rpt_list
+  );
+  ok ($check->can_run, 'the check can run');
+  lives_ok { $check->execute } 'execute method runs OK';
+  is ($check->result->pass, 1, 'result pass attribute is set to 1');
+  is_deeply ($check->result->evaluation_results(), \%expected,
+    'evaluation results are saved');
+  is ($check->result->qc_outcome->{'mqc_outcome'} , 'Accepted preliminary',
+    'correct outcome string');
+};
+
 subtest 'error in evaluation' => sub {
   plan tests => 5;
 
@@ -486,6 +592,7 @@ subtest 'error in evaluation' => sub {
   my $rpt_list = '29524:1:2;29524:2:2;29524:3:2;29524:4:2'; 
 
   my $check = npg_qc::autoqc::checks::review->new(
+    runfolder_path   => $rf_path,
     conf_path        => $test_data_dir,
     qc_in            => $dir,
     rpt_list         => $rpt_list,
@@ -495,6 +602,7 @@ subtest 'error in evaluation' => sub {
     'final outcome - not capturing the error';
 
   $check = npg_qc::autoqc::checks::review->new(
+    runfolder_path   => $rf_path,
     conf_path        => $test_data_dir,
     qc_in            => $dir,
     rpt_list         => $rpt_list,
@@ -547,7 +655,7 @@ subtest 'evaluating generic for artic results' => sub {
     final_qc_outcome => 1);
   is ($check->can_run, 1, 'check can run');
   throws_ok { $check->execute }
-    qr/Not able to run evaluation: No autoqc generic result for ncov2019_artic_nf/,
+    qr/Not able to run evaluation: No generic:ncov2019_artic_nf autoqc result/,
     'message as an error';
 
   # qc_in contains two artic generic results for the same product
@@ -558,7 +666,7 @@ subtest 'evaluating generic for artic results' => sub {
     final_qc_outcome => 1);
   is ($check->can_run, 1, 'check can run');
   throws_ok { $check->execute }
-    qr/Not able to run evaluation: Multiple autoqc results/,
+    qr/Not able to run evaluation: Multiple generic:ncov2019_artic_nf autoqc results/,
     'message as an error';
 
   # qc_in contains other autoqc results for this entity, including
@@ -710,6 +818,122 @@ subtest 'evaluating generic for artic results' => sub {
   is ($result->pass, undef, 'pass attribute is not set');
   is_deeply ($result->evaluation_results, {}, 'no evauation results');
   is_deeply ($result->qc_outcome, {}, 'no qc outcome');
+};
+
+subtest 'evaluating for LCMB library type' => sub { 
+  plan tests => 19;
+
+  my $test_data_path = 't/data/runfolder_49285';
+  my $runfolder_name = '240802_A00537_1044_BHJKCGDSXC';
+  my $staging_dir = tempdir( CLEANUP => 1 );
+  my $id_run = 49285;
+  local $ENV{NPG_CACHED_SAMPLESHEET_FILE} =
+    "$test_data_path/samplesheet_49285.csv";
+
+  my $ae = Archive::Extract->new(
+    archive => "${test_data_path}/${runfolder_name}.tar.gz"
+  );  
+  $ae->extract(to => $staging_dir) or die $ae->error;
+  my $runfolder_path = "${staging_dir}/${runfolder_name}";
+  npg_qc::autoqc::db_loader->new(
+    schema => $schema,
+    id_run => $id_run,
+    archive_path => $runfolder_path .
+      '/Data/Intensities/BAM_basecalls_20240804-060114/no_cal/archive',
+    verbose => 0
+  )->load();
+
+  # Sample-level evaluation
+  my $check = npg_qc::autoqc::checks::review->new(
+    runfolder_path => $runfolder_path,
+    conf_path      => $test_data_path,
+    rpt_list       => "${id_run}:1:1",
+    use_db         => 1,
+    _qc_schema => $schema
+  );
+  lives_ok { $check->execute() } 'plex level check runs OK';
+  my %expected_evaluation_results = map { $_ => 1 } (
+    'sequence_error.pass && (sequence_error.forward_common_cigars->[0]->[0] =~ /\\A\\d+M\\Z/xsm)',
+    'sequence_error.pass && (sequence_error.reverse_common_cigars->[0]->[0] =~ /\\A\\d+M\\Z/xsm)',
+    'bam_flagstats.percent_mapped_reads && (bam_flagstats.percent_mapped_reads > 80)',
+    'verify_bam_id.pass'
+  );
+  my $result = $check->result();
+  is ($result->comments(), undef, 'no comments');
+  is_deeply ($result->evaluation_results(), \%expected_evaluation_results,
+    'sample evaluation results as expected');
+  is ($result->pass, 1, 'the check passed');
+  my $qc_outcome = $result->qc_outcome();
+  ok (defined $qc_outcome->{'timestamp'}, 'timestamp is set');
+  delete $qc_outcome->{'timestamp'};
+  is_deeply ($qc_outcome,
+    {'mqc_outcome' => 'Accepted preliminary', 'username' => 'robo_qc'},
+    'sample QC outcome is saved correctly'
+  );
+
+  # Lane-level evaluation
+  $check = npg_qc::autoqc::checks::review->new(
+    runfolder_path => $runfolder_path,
+    conf_path      => $test_data_path,
+    rpt_list       => "${id_run}:1",
+    use_db         => 1,
+    _qc_schema => $schema
+  );
+  lives_ok { $check->execute() } 'lane level check runs OK';
+  $result = $check->result();
+  is ($result->comments(), undef, 'no comments');
+  %expected_evaluation_results = (
+    'tag_metrics.matches_pf_percent && (tag_metrics.perfect_matches_percent +' .
+      ' tag_metrics.one_mismatch_percent) > 93' => 1,
+    'tag_metrics.all_reads * 302 > 750000000000' => 1,
+    'tag_metrics.all_reads && (((qX_yield.yield1_q30 + qX_yield.yield2_q30) ' .
+      '* 1000 * 100)/(tag_metrics.all_reads * 302) >= 78)' => 1,
+  );
+  is_deeply ($result->evaluation_results(), \%expected_evaluation_results,
+    'lane evaluation results as expected');
+  is ($result->pass, 1, 'the check passed');
+  $qc_outcome = $result->qc_outcome();
+  ok (defined $qc_outcome->{'timestamp'}, 'timestamp is set');
+  delete $qc_outcome->{'timestamp'};
+  is_deeply ($qc_outcome,
+    {'mqc_seq_outcome' => 'Accepted preliminary', 'username' => 'robo_qc'},
+    'lane QC outcome is saved correctly'
+  );
+
+  $check = npg_qc::autoqc::checks::review->new(
+    runfolder_path => $runfolder_path,
+    conf_path      => $test_data_path,
+    rpt_list       => "${id_run}:2",
+    use_db         => 1,
+    _qc_schema => $schema
+  );
+  lives_ok { $check->execute() } 'lane level check runs OK';
+  for my $key (keys %expected_evaluation_results) {
+    $expected_evaluation_results{$key} = 0;
+  }
+  $result = $check->result();
+  is ($result->comments(), undef, 'no comments');
+  is_deeply ($result->evaluation_results(), \%expected_evaluation_results,
+    'lane evaluation results as expected');
+  is ($result->pass, 0, 'the check failed');
+  $qc_outcome = $result->qc_outcome();
+  delete $qc_outcome->{'timestamp'};
+  is_deeply ($qc_outcome,
+    {'mqc_seq_outcome' => 'Rejected preliminary', 'username' => 'robo_qc'},
+    'lane QC outcome is saved correctly'
+  );
+
+  $check = npg_qc::autoqc::checks::review->new(
+    runfolder_path => $runfolder_path,
+    conf_path      => $test_data_path,
+    rpt_list       => "${id_run}:4",
+    use_db         => 1,
+    _qc_schema => $schema
+  );
+  my $with_control = 0;
+  is_deeply ([$check->lims->study_ids($with_control)], [qw(7396 7397)],
+    'lane 4 samples belong to two different studies');
+  lives_and (sub {is $check->can_run, 1}, 'lane-level check can run'); 
 };
 
 1;

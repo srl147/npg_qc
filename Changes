@@ -1,5 +1,8 @@
 LIST OF CHANGES FOR NPG-QC PACKAGE
 
+ - extended tag_sniff to work for elembio
+   fixed how the --rev and --clip options work together
+
  - Remove hardcoded mod_proxy path in httpd_seqqc.conf
  - Bug fix in npg_qc::ultimagen::run_stats in tag_metrics autoqc result
    generation: perfect match and perfect matches pf counts are set to zero

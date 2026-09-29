@@ -15,7 +15,7 @@ my $LIMS_TAGS_URL=q[https://sequencescape.psd.sanger.ac.uk/api/v2/tag_groups] .
                   q[?page%5Bnumber%5D=1&page%5Bsize%5D=500];
 
 ##no critic
-our $VERSION = '72.1.0';
+our $VERSION = '75.1.0';
 
 sub usage {
 
@@ -183,36 +183,47 @@ sub showTags{
         foreach my $i (0..$#subtags) {
             my $subtag = $subtags[$i];
             my @matches = ();
-            if ($clips->[$i]) {
-                if ($clips->[$i] < 0) {
-                    @matches = grep {m/$subtag$/} keys %db_tags;
-                } elsif ($clips->[$i]) {
-                    @matches = grep {m/^$subtag/} keys %db_tags;
-                }
-            } else {
-                if (exists($db_tags{$subtag}) ) {
-                    push(@matches,$subtag);
-                }
-            }
-            foreach my $sequence (@matches) {
-                foreach my $match (@{$db_tags{$sequence}}) {
-                    my ($name,$id,$map_id,$revcomp,$original) = @{$match};
-                    if ($revcomp) {
-                        # revcomp match AND we are looking for revcomp matches AND we are looking for revcomp matches on this tag
-                        if (@{$revcomps} && $revcomps->[$i]) {
-			    $matches{$subtag}->[$i]->{$id} = [$map_id,1,$original];
-                        }
-                    } else {
-                        # not a revcomp match AND we are not looking for revcomp matches or we are not looking for revcomp matches on this tag
-                        if (!@{$revcomps} || !$revcomps->[$i]) {
-                            $matches{$subtag}->[$i]->{$id} = [$map_id,0,$original];
-                        }
-                    }
 
-                    $groups[$i]->{$id}++;
-                    $names{$id} = $name;
-                }
-            }
+            foreach my $sequence (keys %db_tags) {
+		foreach my $potential_match (@{$db_tags{$sequence}}) {
+                    my ($name,$id,$map_id,$revcomp,$original) = @{$potential_match};
+                    my $match = 0;
+		    if (@{$clips} && $clips->[$i] > 0) {
+			# potential matches are clipped from the end
+			if($revcomp && @{$revcomps} && $revcomps->[$i] && $sequence =~ m/$subtag$/) {
+   			    # we are looking for revcomp matches on this tag so the match should be at the end of the tag
+			    $match = 1;
+			} elsif (!$revcomp && (!@{$revcomps} || !$revcomps->[$i]) && $sequence =~ m/^$subtag/) {
+   			    # we are not looking for revcomp matches on this tag so the match should be at the start of the tag
+                            $match = 1;
+			}
+	            } elsif (@{$clips} && $clips->[$i] < 0) {
+			# potential matches are clipped from the start
+		        if($revcomp && @{$revcomps} && $revcomps->[$i] && $sequence =~ m/^$subtag/) {
+   			    # we are looking for revcomp matches on this tag so the match should be at the start of the tag
+			    $match = 1;
+		        } elsif (!$revcomp && (!@{$revcomps} || !$revcomps->[$i]) && $sequence =~ m/$subtag$/) {
+   			    # we are not looking for revcomp matches on this tag so the match should be at the end of the tag
+			    $match = 1;
+			}
+		    } else {
+			# potential matches are not clipped so the match should be exact
+		        if($revcomp && @{$revcomps} && $revcomps->[$i] && $sequence eq $subtag) {
+   			    # we are looking for revcomp matches
+			    $match = 1;
+			} elsif (!$revcomp && (!@{$revcomps} || !$revcomps->[$i]) && $sequence eq $subtag) {
+   			    # we are not looking for revcomp matches
+			    $match = 1;
+			}
+                    }
+                    if ($match) {
+                        $matches{$subtag}->[$i]->{$id} = [$map_id,$revcomp,$original];
+                        $groups[$i]->{$id}++;
+                        $names{$id} = $name;
+		    }
+		}
+	    }
+
         }
         $unassigned -= $tagsFound{$tag};
     }
@@ -287,10 +298,10 @@ sub main{
     my %tagsFound;
 
     while (<>) {
-        if (/((BC:)|(RT:))Z:([A-Z\-]*)/) {
+        if (/((BC:)|(RT:))Z:([A-Z\-\+]*)/) {
             my $tag = $4;
-            if ($tag =~ m/\-/) {
-                my @subtags = split(/\-/, $tag);
+            if ($tag =~ m/[\-\+]/) {
+                my @subtags = split(/[\-\+]/, $tag);
                 foreach my $i (0..$#tagLengths) {
                     my $subtag;
                     if ($tagLengths[$i] == 0) {
